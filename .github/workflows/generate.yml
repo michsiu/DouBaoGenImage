@@ -3,8 +3,8 @@ name: 豆包批量生图
 on:
   push:
     paths:
-      - 'task.txt'     # 只有 task.txt 变化才触发
-  workflow_dispatch:   # 也允许手动触发
+      - 'task.txt'
+  workflow_dispatch:
 
 jobs:
   generate:
@@ -19,8 +19,7 @@ jobs:
           python-version: '3.10'
 
       - name: 安装依赖
-        run: |
-          pip install requests numpy opencv-python-headless pillow scikit-learn
+        run: pip install requests numpy opencv-python-headless pillow scikit-learn
 
       - name: 创建配置文件
         env:
@@ -29,32 +28,27 @@ jobs:
           DOUBAO_A_BOGUS: ${{ secrets.DOUBAO_A_BOGUS }}
         run: |
           python3 -c "
-          import json
+          import json, os
           cfg = {
               'commands': {'draw': '豆包'},
               'auth': {
-                  'cookie': '${DOUBAO_COOKIE}',
-                  'msToken': '${DOUBAO_MSTOKEN}',
-                  'a_bogus': '${DOUBAO_A_BOGUS}'
+                  'cookie': os.environ['DOUBAO_COOKIE'],
+                  'msToken': os.environ['DOUBAO_MSTOKEN'],
+                  'a_bogus': os.environ['DOUBAO_A_BOGUS']
               },
               'storage': {'retention_days': 7},
               'styles': [],
-              'params': {
-                  'ratios': ['1:1', '2:3', '4:3', '9:16', '16:9'],
-                  'default_ratio': '1:1'
-              }
+              'params': {'ratios': ['1:1','2:3','4:3','9:16','16:9'], 'default_ratio': '1:1'}
           }
-          with open('config.json', 'w') as f:
-              json.dump(cfg, f, ensure_ascii=False, indent=2)
+          with open('config.json','w') as f:
+              json.dump(cfg,f,ensure_ascii=False,indent=2)
           print('✅ config.json 已生成')
           "
 
       - name: 运行生图任务
-        id: generate
-        run: |
-          python scripts/generate.py
+        run: python scripts/generate.py
 
-      - name: 上传结果 (Artifacts)
+      - name: 上传结果
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -62,10 +56,3 @@ jobs:
           path: |
             output/
             logs/
-
-      - name: 显示 task.txt 内容
-        run: |
-          echo "## 📋 task.txt 内容" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat task.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
