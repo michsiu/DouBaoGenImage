@@ -1,0 +1,71 @@
+name: 豆包批量生图
+
+on:
+  push:
+    paths:
+      - 'task.txt'     # 只有 task.txt 变化才触发
+  workflow_dispatch:   # 也允许手动触发
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: |
+          pip install requests numpy opencv-python-headless pillow scikit-learn
+
+      - name: 创建配置文件
+        env:
+          DOUBAO_COOKIE: ${{ secrets.DOUBAO_COOKIE }}
+          DOUBAO_MSTOKEN: ${{ secrets.DOUBAO_MSTOKEN }}
+          DOUBAO_A_BOGUS: ${{ secrets.DOUBAO_A_BOGUS }}
+        run: |
+          python3 -c "
+          import json
+          cfg = {
+              'commands': {'draw': '豆包'},
+              'auth': {
+                  'cookie': '${DOUBAO_COOKIE}',
+                  'msToken': '${DOUBAO_MSTOKEN}',
+                  'a_bogus': '${DOUBAO_A_BOGUS}'
+              },
+              'storage': {'retention_days': 7},
+              'styles': [],
+              'params': {
+                  'ratios': ['1:1', '2:3', '4:3', '9:16', '16:9'],
+                  'default_ratio': '1:1'
+              }
+          }
+          with open('config.json', 'w') as f:
+              json.dump(cfg, f, ensure_ascii=False, indent=2)
+          print('✅ config.json 已生成')
+          "
+
+      - name: 运行生图任务
+        id: generate
+        run: |
+          python scripts/generate.py
+
+      - name: 上传结果 (Artifacts)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: generation-results
+          path: |
+            output/
+            logs/
+
+      - name: 显示 task.txt 内容
+        run: |
+          echo "## 📋 task.txt 内容" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat task.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
