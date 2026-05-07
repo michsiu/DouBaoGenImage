@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 批量生图脚本 - 读取 task.txt，逐行处理，输出日志和结果
+保存原生豆包 API 请求和原始响应流
 """
 import sys
 import json
@@ -8,6 +9,7 @@ import os
 import time
 import uuid
 import logging
+import requests
 from datetime import datetime
 
 # ====== 设置日志 (必须在最开始) ======
@@ -51,7 +53,6 @@ if not logger.handlers:
 """)
 
 from module.token_manager import TokenManager
-from module.api_client import ApiClient
 # ====== 导入完成 ======
 
 
@@ -108,21 +109,53 @@ def load_tasks():
     return tasks
 
 
-def save_raw_response(task_line, result):
-    """保存原始 API 响应"""
-    raw_dir = os.path.join(ROOT_DIR, "output", "raw_api_responses")
-    os.makedirs(raw_dir, exist_ok=True)
-    raw_file = os.path.join(raw_dir, f"task_{task_line}_{int(time.time())}.json")
-    
-    with open(raw_file, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    
-    logger.info(f"📄 原始响应已保存: {raw_file}")
-    return raw_file
+def get_headers(config):
+    """构建请求头"""
+    auth = config.get('auth', {})
+    return {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "agw-js-conv": "str",
+        "content-type": "application/json",
+        "cookie": auth.get("cookie", ""),
+        "last-event-id": "undefined",
+        "origin": "https://www.doubao.com",
+        "priority": "u=1, i",
+        "referer": "https://www.doubao.com/chat/create-image",
+        "sec-ch-ua": '"Google Chrome";v="129", "Not=A?Brand";v="8", "Chromium";v="129"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    }
 
 
-def generate_single(client, task):
-    """生成单张图片"""
+def get_params(config):
+    """构建请求参数"""
+    auth = config.get('auth', {})
+    return {
+        "aid": "497858",
+        "device_id": "7450669489257268771",
+        "device_platform": "web",
+        "language": "zh",
+        "pkg_type": "release_version",
+        "real_aid": "497858",
+        "region": "CN",
+        "samantha_web": "1",
+        "sys_region": "CN",
+        "tea_uuid": "7397236635946141218",
+        "use-olympus-account": "1",
+        "version_code": "20800",
+        "web_id": "7397236635946141218",
+        "msToken": auth.get("msToken", ""),
+        "a_bogus": auth.get("a_bogus", "")
+    }
+
+
+def generate_single(config, task):
+    """生成单张图片 - 直接请求豆包 API，保存原始响应流"""
     prompt = task["prompt"]
     style = task.get("style")
     ratio = task.get("ratio")
@@ -135,7 +168,8 @@ def generate_single(client, task):
 
     logger.info(f"🎨 [{task['line']}] {full_prompt}")
 
-    data = {
+    # 构建请求体
+    body = {
         "messages": [{
             "content": json.dumps({"text": full_prompt}, ensure_ascii=False),
             "content_type": 2009,
@@ -156,52 +190,201 @@ def generate_single(client, task):
         "local_conversation_id": f"local_{int(time.time() * 1000)}"
     }
 
+    # ====== 保存原始请求 ======
+    raw_dir = os.path.join(ROOT_DIR, "output", "raw_api_responses")
+    os.makedirs(raw_dir, exist_ok=True)
+
+    request_file = os.path.join(raw_dir, f"task_{task['line']}_request.json")
+    with open(request_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "url": "https://www.doubao.com/samantha/chat/completion",
+            "method": "POST",
+            "headers": {k: v if k != "cookie" else "***隐藏***" for k, v in get_headers(config).items()},
+            "params": get_params(config),
+            "body": body
+        }, f, ensure_ascii=False, indent=2)
+    logger.info(f"📤 请求已保存: {request_file}")
+    # ====== 请求保存完毕 ======
+
     try:
-        logger.info("📡 发送请求中...")
-        result = client.send_request(data, "/samantha/chat/completion")
-        
-        # ====== 保存原始 API 响应 ======
-        if result:
-            save_raw_response(task["line"], result)
-            logger.info(f"📦 响应键: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
-            logger.info(f"📦 URL数量: {len(result.get('urls', []))}")
-        else:
-            logger.error("📦 响应为空 (None)")
-        # ====== 保存完毕 ======
-        
+        logger.info("📡 发送请求到豆包 API...")
+
+        # ====== 直接发送 HTTP 请求 ======
+        url = "https://www.doubao.com/samantha/chat/completion"
+        headers = get_headers(config)
+        params = get_params(config)
+
+        response = requests.post(
+            url,
+            json=body,
+            headers=headers,
+            params=params,
+            stream=True,
+            timeout=120
+        )
+
+        logger.info(f"📡 响应状态码: {response.status_code}")
+
+        # ====== 保存原始响应流（逐行写入，一字不改） ======
+        raw_response_file = os.path.join(raw_dir, f"task_{task['line']}_raw_response.txt")
+        all_raw_lines = []
+        image_urls = []
+        conversation_id = None
+        section_id = None
+        reply_id = None
+
+        with open(raw_response_file, "w", encoding="utf-8") as raw_f:
+            raw_f.write(f"=== 豆包 API 原始响应流 ===\n")
+            raw_f.write(f"任务行号: {task['line']}\n")
+            raw_f.write(f"提示词: {prompt}\n")
+            raw_f.write(f"状态码: {response.status_code}\n")
+            raw_f.write(f"响应头:\n")
+            for k, v in response.headers.items():
+                raw_f.write(f"  {k}: {v}\n")
+            raw_f.write(f"\n=== 响应体（流式数据，每行一个事件） ===\n\n")
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+                decoded_line = line.decode('utf-8')
+                raw_f.write(decoded_line + "\n")
+                all_raw_lines.append(decoded_line)
+
+                # ====== 同时尝试提取图片 URL（不中断流程） ======
+                if decoded_line.startswith("data:"):
+                    try:
+                        json_str = decoded_line[5:].strip()
+                        if not json_str or json_str == "[DONE]":
+                            continue
+
+                        chunk = json.loads(json_str)
+                        event_data_raw = chunk.get("event_data", "{}")
+
+                        # 安全处理 event_data
+                        if isinstance(event_data_raw, str):
+                            try:
+                                event_data = json.loads(event_data_raw)
+                            except json.JSONDecodeError:
+                                continue
+                        elif isinstance(event_data_raw, dict):
+                            event_data = event_data_raw
+                        else:
+                            continue
+
+                        if not isinstance(event_data, dict):
+                            continue
+
+                        # 提取会话信息
+                        if "conversation_id" in event_data:
+                            conversation_id = event_data["conversation_id"]
+                        if "section_id" in event_data:
+                            section_id = event_data.get("section_id")
+                        if "reply_id" in event_data:
+                            reply_id = event_data.get("reply_id")
+
+                        # 提取图片 URL
+                        if "message" in event_data:
+                            message = event_data["message"]
+
+                            if isinstance(message, str):
+                                try:
+                                    message = json.loads(message)
+                                except json.JSONDecodeError:
+                                    continue
+
+                            if isinstance(message, dict) and message.get("content_type") == 2010:
+                                content = message.get("content", "{}")
+
+                                if isinstance(content, str):
+                                    try:
+                                        content = json.loads(content)
+                                    except json.JSONDecodeError:
+                                        continue
+
+                                if isinstance(content, dict):
+                                    for img_data in content.get("data", []):
+                                        if isinstance(img_data, dict):
+                                            image_raw = img_data.get("image_raw", {})
+                                            if isinstance(image_raw, dict):
+                                                url = image_raw.get("url")
+                                                if url:
+                                                    image_urls.append(url)
+                                                    logger.info(f"[Doubao] 找到图片 URL: {url[:80]}...")
+                    except Exception as e:
+                        # 解析失败不影响原始数据保存
+                        logger.debug(f"解析某行时出错（不影响保存）: {e}")
+                        continue
+
+        logger.info(f"📄 原始响应已保存: {raw_response_file} (共 {len(all_raw_lines)} 行)")
+        # ====== 原始响应保存完毕 ======
+
+        # ====== 保存解析后的结果 ======
+        parsed_file = os.path.join(raw_dir, f"task_{task['line']}_parsed.json")
+        with open(parsed_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "task": {
+                    "line": task["line"],
+                    "prompt": prompt,
+                    "style": style,
+                    "ratio": ratio,
+                    "full_prompt": full_prompt
+                },
+                "response": {
+                    "status_code": response.status_code,
+                    "image_urls": image_urls,
+                    "image_count": len(image_urls),
+                    "conversation_id": conversation_id,
+                    "section_id": section_id,
+                    "reply_id": reply_id,
+                    "raw_lines_count": len(all_raw_lines)
+                }
+            }, f, ensure_ascii=False, indent=2)
+        logger.info(f"📄 解析结果已保存: {parsed_file}")
+        # ====== 解析结果保存完毕 ======
+
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ [{task['line']}] 请求超时")
+        return {
+            "success": False,
+            "line": task["line"],
+            "prompt": prompt,
+            "error": "请求超时"
+        }
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [{task['line']}] 请求失败: {e}")
+        return {
+            "success": False,
+            "line": task["line"],
+            "prompt": prompt,
+            "error": f"请求失败: {str(e)}"
+        }
     except Exception as e:
-        logger.error(f"❌ [{task['line']}] 请求异常: {e}")
-        # 也保存异常信息
-        save_raw_response(task["line"], {"error": str(e), "success": False})
+        logger.error(f"❌ [{task['line']}] 未知错误: {e}")
         return {
             "success": False,
             "line": task["line"],
             "prompt": prompt,
-            "error": f"请求异常: {str(e)}"
+            "error": f"未知错误: {str(e)}"
         }
 
-    if not result:
-        # 保存空响应
-        save_raw_response(task["line"], {"error": "请求返回空 (None)", "success": False})
+    if not image_urls:
+        logger.error(f"❌ [{task['line']}] 未提取到图片 URL")
+        logger.error(f"   原始响应行数: {len(all_raw_lines)}")
+        # 打印最后几行方便调试
+        if all_raw_lines:
+            logger.error(f"   最后 3 行原始响应:")
+            for l in all_raw_lines[-3:]:
+                logger.error(f"     {l[:200]}")
         return {
             "success": False,
             "line": task["line"],
             "prompt": prompt,
-            "error": "请求返回空 (None)"
+            "error": f"未提取到图片 URL（响应行数: {len(all_raw_lines)}）"
         }
 
-    urls = result.get("urls", [])
-    if not urls:
-        return {
-            "success": False,
-            "line": task["line"],
-            "prompt": prompt,
-            "error": "未获取到图片URL",
-            "raw_keys": list(result.keys()) if isinstance(result, dict) else str(type(result))
-        }
-
-    logger.info(f"✅ [{task['line']}] 成功: {len(urls)} 张图片")
-    for i, url in enumerate(urls, 1):
+    logger.info(f"✅ [{task['line']}] 成功: {len(image_urls)} 张图片")
+    for i, url in enumerate(image_urls, 1):
         logger.info(f"    [{i}] {url}")
 
     return {
@@ -210,10 +393,10 @@ def generate_single(client, task):
         "prompt": prompt,
         "style": style,
         "ratio": ratio,
-        "urls": urls,
-        "conversation_id": result.get("conversation_id"),
-        "section_id": result.get("section_id"),
-        "reply_id": result.get("reply_id")
+        "urls": image_urls,
+        "conversation_id": conversation_id,
+        "section_id": section_id,
+        "reply_id": reply_id
     }
 
 
@@ -231,10 +414,6 @@ def main():
         logger.warning("没有有效的任务，退出")
         return
 
-    # 初始化
-    tm = TokenManager(config)
-    client = ApiClient(tm)
-
     # 逐条执行
     results = []
     success_count = 0
@@ -245,7 +424,7 @@ def main():
         logger.info(f"📌 任务 {i}/{len(tasks)}")
         logger.info(f"{'─' * 40}")
 
-        result = generate_single(client, task)
+        result = generate_single(config, task)
         results.append(result)
 
         if result["success"]:
@@ -296,18 +475,19 @@ def main():
     if "GITHUB_STEP_SUMMARY" in os.environ:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write(f"## 📊 豆包生图结果\n\n")
-            f.write(f"| 行号 | 状态 | 提示词 | 图片数 | 会话ID |\n")
-            f.write(f"|---|---|---|---|---|\n")
+            f.write(f"| 行号 | 状态 | 提示词 | 图片数 |\n")
+            f.write(f"|---|---|---|---|\n")
             for r in results:
                 status = "✅" if r["success"] else "❌"
-                prompt = r.get("prompt", "")[:25]
+                prompt_text = r.get("prompt", "")[:25]
                 count = len(r.get("urls", []))
-                conv_id = r.get("conversation_id", "-")[:12] if r.get("conversation_id") else "-"
-                f.write(f"| {r['line']} | {status} | {prompt} | {count} | {conv_id} |\n")
+                f.write(f"| {r['line']} | {status} | {prompt_text} | {count} |\n")
             f.write(f"\n**总计: {success_count} 成功, {fail_count} 失败**\n\n")
-            f.write(f"📁 Artifacts 包含:\n")
-            f.write(f"- `output/results_*.json` → 汇总结果\n")
-            f.write(f"- `output/raw_api_responses/` → 每个任务的原始 API 响应\n")
+            f.write(f"### 📁 Artifacts 包含:\n")
+            f.write(f"- `output/raw_api_responses/task_N_request.json` → 原始请求\n")
+            f.write(f"- `output/raw_api_responses/task_N_raw_response.txt` → **原生 API 响应流（逐行）**\n")
+            f.write(f"- `output/raw_api_responses/task_N_parsed.json` → 解析后结果\n")
+            f.write(f"- `output/results_*.json` → 汇总\n")
             f.write(f"- `logs/` → 完整运行日志\n")
 
     if fail_count > 0:
