@@ -21,6 +21,182 @@ jobs:
       - name: 安装依赖
         run: pip install requests numpy opencv-python-headless pillow scikit-learn
 
+      - name: 创建兼容模块和修复导入
+        run: |
+          mkdir -p common bridge
+          
+          # common/log.py
+          cat > common/log.py << 'PYEOF'
+          import logging, sys
+          logger = logging.getLogger("doubao")
+          logger.setLevel(logging.INFO)
+          if not logger.handlers:
+              handler = logging.StreamHandler(sys.stdout)
+              handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+              logger.addHandler(handler)
+          PYEOF
+          touch common/__init__.py
+          touch bridge/__init__.py
+          
+          echo "✅ 兼容模块已创建"
+
+      - name: 修复所有模块的导入语句
+        run: |
+          python3 << 'PYEOF'
+          import os
+
+          files = [
+              'module/image_processor.py',
+              'module/image_storage.py',
+              'module/image_uploader.py',
+              'module/token_manager.py',
+              'module/api_client.py',
+              'doubao.py'
+          ]
+
+          for fp in files:
+              if not os.path.exists(fp):
+                  print(f'⚠️  跳过(不存在): {fp}')
+                  continue
+              
+              with open(fp, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              
+              old = 'from common.log import logger'
+              new = '''try:
+              from common.log import logger
+          except ImportError:
+              import logging
+              logger = logging.getLogger(__name__)'''
+              
+              if old in content:
+                  content = content.replace(old, new)
+                  with open(fp, 'w', encoding='utf-8') as f:
+                      f.write(content)
+                  print(f'✅ 已修复: {fp}')
+              else:
+                  print(f'⏭️  跳过(无需修复): {fp}')
+          PYEOF
+
+      - name: 修复 api_client.py 响应解析错误
+        run: |
+          python3 << 'PYEOF'
+          import os, re
+
+          fp = 'module/api_client.py'
+          if not os.path.exists(fp):
+              print(f'❌ 文件不存在: {fp}')
+              exit(1)
+
+          with open(fp, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          # 替换 send_request 方法中的流式响应处理部分
+          old_block = """            for line in response.iter_lines():
+                  if not line:
+                      continue
+                      
+                  line = line.decode('utf-8')
+                  if not line.startswith("data:"):
+                      continue
+                      
+                  try:
+                      data = json.loads(line[5:])
+                      event_data = json.loads(data.get("event_data", "{}"))
+                      logger.debug(f"[Doubao] Response event_data: {event_data}")"""
+
+          new_block = """            for line in response.iter_lines():
+                  if not line:
+                      continue
+                      
+                  line = line.decode('utf-8')
+                  if not line.startswith("data:"):
+                      continue
+                      
+                  try:
+                      json_str = line[5:].strip()
+                      if not json_str or json_str == "[DONE]":
+                          continue
+                      
+                      data_chunk = json.loads(json_str)
+                      event_data_raw = data_chunk.get("event_data", "{}")
+                      
+                      # 安全处理 event_data：可能是字符串也可能是字典
+                      if isinstance(event_data_raw, str):
+                          try:
+                              event_data = json.loads(event_data_raw)
+                          except json.JSONDecodeError:
+                              logger.warning(f"[Doubao] event_data 不是合法 JSON: {str(event_data_raw)[:200]}")
+                              continue
+                      else:
+                          event_data = event_data_raw
+                      
+                      if not isinstance(event_data, dict):
+                          logger.warning(f"[Doubao] event_data 不是字典类型: {type(event_data)}")
+                          continue
+                      
+                      logger.debug(f"[Doubao] Response event_data: {event_data}")"""
+
+          if old_block in content:
+              content = content.replace(old_block, new_block)
+              with open(fp, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print(f'✅ 已修复 api_client.py 响应解析')
+          else:
+              print(f'⚠️  未找到匹配代码块，尝试备选修复...')
+              
+              # 备选：直接修复 json.loads(data.get(...)) 这一行
+              old_line = 'event_data = json.loads(data.get("event_data", "{}"))'
+              new_line = '''event_data_raw = data.get("event_data", "{}")
+                      if isinstance(event_data_raw, str):
+                          event_data = json.loads(event_data_raw)
+                      else:
+                          event_data = event_data_raw'''
+              
+              if old_line in content:
+                  content = content.replace(old_line, new_line)
+                  with open(fp, 'w', encoding='utf-8') as f:
+                      f.write(content)
+                  print(f'✅ 备选修复成功')
+              else:
+                  print(f'❌ 未找到任何匹配代码，请手动检查 api_client.py')
+          PYEOF
+
+      - name: 修复 message 字段的类型处理
+        run: |
+          python3 << 'PYEOF'
+          import os
+
+          fp = 'module/api_client.py'
+          if not os.path.exists(fp):
+              exit(1)
+
+          with open(fp, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          # 修复 message 可能是字符串的问题
+          old_line = 'message = event_data["message"]'
+          new_block = '''message_raw = event_data["message"]
+                      if isinstance(message_raw, str):
+                          try:
+                              message = json.loads(message_raw)
+                          except json.JSONDecodeError:
+                              continue
+                      else:
+                          message = message_raw'''
+
+          if old_line in content:
+              content = content.replace(old_line, message_raw)
+              # 替换后续的 message 引用
+              content = content.replace('message_raw', 'message')
+              content = content.replace(old_line, new_block)
+              with open(fp, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print(f'✅ 已修复 message 类型处理')
+          else:
+              print(f'⏭️  message 行已处理或不存在')
+          PYEOF
+
       - name: 创建配置文件
         env:
           DOUBAO_COOKIE: ${{ secrets.DOUBAO_COOKIE }}
@@ -46,13 +222,14 @@ jobs:
           "
 
       - name: 运行生图任务
+        id: generate
         run: python scripts/generate.py
 
-      - name: 上传结果
+      - name: 上传结果和日志
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: generation-results
+          name: doubao-results
           path: |
             output/
             logs/
