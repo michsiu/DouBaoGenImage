@@ -53,91 +53,153 @@ jobs:
               else: print(f'⚠️  {fp} 不存在')
           PYEOF
 
-      - name: 修复 api_client.py 响应解析
+      - name: 完全重写 api_client.py 的 send_request 方法
         run: |
           python3 << 'PYEOF'
-          import os
+          import os, re
 
           fp = 'module/api_client.py'
-          if not os.path.exists(fp):
-              print(f'❌ 文件不存在: {fp}')
-              exit(1)
-
           with open(fp, 'r', encoding='utf-8') as f:
               content = f.read()
 
-          # 修复1: event_data 类型安全处理
-          old1 = '''event_data = json.loads(data.get("event_data", "{}"))
-                      logger.debug(f"[Doubao] Response event_data: {event_data}")'''
-          
-          new1 = '''event_data_raw = data.get("event_data", "{}")
-                      if isinstance(event_data_raw, str):
-                          try:
-                              event_data = json.loads(event_data_raw)
-                          except json.JSONDecodeError:
-                              logger.warning(f"[Doubao] event_data 不是合法 JSON: {str(event_data_raw)[:200]}")
-                              continue
-                      else:
-                          event_data = event_data_raw
-                      if not isinstance(event_data, dict):
+          # 找到 send_request 方法的开头和结尾，整个替换
+          # 策略：找到 "def send_request" 到下一个 "def " 之间的内容，全部替换
+
+          new_method = '''    def send_request(self, data, endpoint="/samantha/chat/completion"):
+          """发送请求 - 已修复类型安全版本"""
+          try:
+              url = self.base_url + endpoint
+              headers = self._get_headers()
+              
+              if endpoint == "/samantha/chat/completion" and "messages" in data:
+                  if isinstance(data["messages"][0]["content"], dict):
+                      data["messages"][0]["content"] = json.dumps(data["messages"][0]["content"])
+              
+              response = requests.post(
+                  url, json=data, headers=headers,
+                  params=self._get_params(),
+                  stream=endpoint == "/samantha/chat/completion",
+                  timeout=120
+              )
+              response.raise_for_status()
+              
+              if endpoint == "/samantha/chat/completion":
+                  image_urls = []
+                  conversation_id = None
+                  section_id = None
+                  reply_id = None
+                  
+                  for line in response.iter_lines():
+                      if not line:
                           continue
-                      logger.debug(f"[Doubao] Response event_data: {event_data}")'''
-
-          if old1 in content:
-              content = content.replace(old1, new1)
-              print('✅ 修复1: event_data 类型安全')
-          else:
-              print('⚠️  修复1: 未找到匹配代码')
-
-          # 修复2: message 类型安全处理
-          old2 = '''if "message" in event_data:
-                          message = event_data["message"]
-                          logger.debug(f"[Doubao] Message data: {message}")
-                          if message.get("content_type") == 2010:'''
-          
-          new2 = '''if "message" in event_data:
-                          message = event_data["message"]
-                          if isinstance(message, str):
+                      line = line.decode('utf-8')
+                      if not line.startswith("data:"):
+                          continue
+                      try:
+                          json_str = line[5:].strip()
+                          if not json_str or json_str == "[DONE]":
+                              continue
+                          
+                          data_chunk = json.loads(json_str)
+                          event_data_raw = data_chunk.get("event_data", "{}")
+                          
+                          # 安全处理 event_data
+                          if isinstance(event_data_raw, str):
                               try:
-                                  message = json.loads(message)
+                                  event_data = json.loads(event_data_raw)
                               except json.JSONDecodeError:
                                   continue
-                          if not isinstance(message, dict):
+                          elif isinstance(event_data_raw, dict):
+                              event_data = event_data_raw
+                          else:
                               continue
-                          logger.debug(f"[Doubao] Message data: {message}")
-                          if message.get("content_type") == 2010:'''
-
-          if old2 in content:
-              content = content.replace(old2, new2)
-              print('✅ 修复2: message 类型安全')
-          else:
-              print('⚠️  修复2: 未找到匹配代码')
-
-          # 修复3: content 类型安全处理
-          old3 = '''content = json.loads(message["content"])
-                                  if "data" in content:'''
-          
-          new3 = '''content_raw = message["content"]
-                                  if isinstance(content_raw, str):
+                          
+                          if not isinstance(event_data, dict):
+                              continue
+                          
+                          if "conversation_id" in event_data:
+                              conversation_id = event_data["conversation_id"]
+                              section_id = event_data.get("section_id")
+                              reply_id = event_data.get("reply_id")
+                          
+                          if "message" in event_data:
+                              message = event_data["message"]
+                              # 安全处理 message
+                              if isinstance(message, str):
+                                  try:
+                                      message = json.loads(message)
+                                  except json.JSONDecodeError:
+                                      continue
+                              if not isinstance(message, dict):
+                                  continue
+                              
+                              if message.get("content_type") == 2010:
+                                  content = message.get("content", "{}")
+                                  # 安全处理 content
+                                  if isinstance(content, str):
                                       try:
-                                          content = json.loads(content_raw)
+                                          content = json.loads(content)
                                       except json.JSONDecodeError:
                                           continue
-                                  else:
-                                      content = content_raw
-                                  if isinstance(content, dict) and "data" in content:'''
+                                  if not isinstance(content, dict):
+                                      continue
+                                  
+                                  for img_data in content.get("data", []):
+                                      if isinstance(img_data, dict):
+                                          image_raw = img_data.get("image_raw", {})
+                                          if isinstance(image_raw, dict):
+                                              url = image_raw.get("url")
+                                              if url:
+                                                  image_urls.append(url)
+                                                  logger.info(f"[Doubao] Found image URL: {url}")
+                      except json.JSONDecodeError:
+                          continue
+                      except Exception as e:
+                          logger.error(f"[Doubao] Error processing response line: {e}")
+                          continue
+                  
+                  return {
+                      "urls": image_urls,
+                      "conversation_id": conversation_id,
+                      "section_id": section_id,
+                      "reply_id": reply_id
+                  }
+              else:
+                  return response.json()
+          except Exception as e:
+              logger.error(f"[Doubao] Error sending request: {e}")
+              return None'''
 
-          if old3 in content:
-              content = content.replace(old3, new3)
-              print('✅ 修复3: content 类型安全')
+          # 用正则匹配整个 send_request 方法
+          pattern = r'    def send_request\(self.*?return None\n'
+          match = re.search(pattern, content, re.DOTALL)
+          
+          if match:
+              content = content[:match.start()] + new_method + '\n' + content[match.end():]
+              print('✅ 已替换 send_request 方法')
           else:
-              print('⚠️  修复3: 未找到匹配代码')
+              # 备选: 尝试匹配到文件末尾
+              pattern2 = r'    def send_request\(self.*'
+              match2 = re.search(pattern2, content, re.DOTALL)
+              if match2:
+                  # 从 send_request 开始截到文件末尾
+                  before = content[:match2.start()]
+                  # 找到下一个 def 或类结束
+                  rest = content[match2.start():]
+                  next_def = re.search(r'\n    def [a-z]', rest)
+                  if next_def:
+                      after = rest[next_def.start():]
+                  else:
+                      after = ''
+                  content = before + new_method + '\n' + after
+                  print('✅ 备选方案已替换 send_request 方法')
+              else:
+                  print('❌ 未找到 send_request 方法')
+                  exit(1)
 
-          # 写入修复后的文件
           with open(fp, 'w', encoding='utf-8') as f:
               f.write(content)
-          
-          print('✅ api_client.py 修复完成')
+          print('✅ api_client.py 重写完成')
           PYEOF
 
       - name: 创建配置文件
