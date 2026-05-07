@@ -108,6 +108,19 @@ def load_tasks():
     return tasks
 
 
+def save_raw_response(task_line, result):
+    """保存原始 API 响应"""
+    raw_dir = os.path.join(ROOT_DIR, "output", "raw_api_responses")
+    os.makedirs(raw_dir, exist_ok=True)
+    raw_file = os.path.join(raw_dir, f"task_{task_line}_{int(time.time())}.json")
+    
+    with open(raw_file, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    
+    logger.info(f"📄 原始响应已保存: {raw_file}")
+    return raw_file
+
+
 def generate_single(client, task):
     """生成单张图片"""
     prompt = task["prompt"]
@@ -144,34 +157,47 @@ def generate_single(client, task):
     }
 
     try:
+        logger.info("📡 发送请求中...")
         result = client.send_request(data, "/samantha/chat/completion")
+        
+        # ====== 保存原始 API 响应 ======
+        if result:
+            save_raw_response(task["line"], result)
+            logger.info(f"📦 响应键: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+            logger.info(f"📦 URL数量: {len(result.get('urls', []))}")
+        else:
+            logger.error("📦 响应为空 (None)")
+        # ====== 保存完毕 ======
+        
     except Exception as e:
         logger.error(f"❌ [{task['line']}] 请求异常: {e}")
+        # 也保存异常信息
+        save_raw_response(task["line"], {"error": str(e), "success": False})
         return {
             "success": False,
             "line": task["line"],
             "prompt": prompt,
-            "error": str(e)
+            "error": f"请求异常: {str(e)}"
         }
 
     if not result:
-        logger.error(f"❌ [{task['line']}] 请求返回空: {prompt}")
+        # 保存空响应
+        save_raw_response(task["line"], {"error": "请求返回空 (None)", "success": False})
         return {
             "success": False,
             "line": task["line"],
             "prompt": prompt,
-            "error": "请求返回空"
+            "error": "请求返回空 (None)"
         }
 
     urls = result.get("urls", [])
     if not urls:
-        logger.error(f"❌ [{task['line']}] 未获取到图片: {prompt}")
         return {
             "success": False,
             "line": task["line"],
             "prompt": prompt,
             "error": "未获取到图片URL",
-            "raw_response": result
+            "raw_keys": list(result.keys()) if isinstance(result, dict) else str(type(result))
         }
 
     logger.info(f"✅ [{task['line']}] 成功: {len(urls)} 张图片")
@@ -186,7 +212,8 @@ def generate_single(client, task):
         "ratio": ratio,
         "urls": urls,
         "conversation_id": result.get("conversation_id"),
-        "section_id": result.get("section_id")
+        "section_id": result.get("section_id"),
+        "reply_id": result.get("reply_id")
     }
 
 
@@ -231,7 +258,7 @@ def main():
             logger.info("⏳ 等待 3 秒...")
             time.sleep(3)
 
-    # 保存结果
+    # 保存汇总结果
     output_dir = os.path.join(ROOT_DIR, "output")
     os.makedirs(output_dir, exist_ok=True)
     result_file = os.path.join(output_dir, f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
@@ -253,8 +280,9 @@ def main():
     logger.info(f"   总数: {len(tasks)}")
     logger.info(f"   成功: {success_count} ✅")
     logger.info(f"   失败: {fail_count} ❌")
-    logger.info(f"   结果: {result_file}")
-    logger.info(f"   日志: {log_file}")
+    logger.info(f"   汇总结果: {result_file}")
+    logger.info(f"   运行日志: {log_file}")
+    logger.info(f"   原始响应: output/raw_api_responses/")
     logger.info("=" * 60)
 
     # 失败列表
@@ -262,27 +290,26 @@ def main():
         logger.warning("\n❌ 失败任务详情:")
         for r in results:
             if not r["success"]:
-                logger.warning(f"   第{r['line']}行: {r['prompt'][:30]} → {r['error']}")
+                logger.warning(f"   第{r['line']}行: {r['prompt'][:40]} → {r['error']}")
 
     # GitHub Actions summary
     if "GITHUB_STEP_SUMMARY" in os.environ:
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
             f.write(f"## 📊 豆包生图结果\n\n")
-            f.write(f"| # | 行号 | 状态 | 提示词 | 图片数 |\n")
+            f.write(f"| 行号 | 状态 | 提示词 | 图片数 | 会话ID |\n")
             f.write(f"|---|---|---|---|---|\n")
             for r in results:
                 status = "✅" if r["success"] else "❌"
-                prompt = r.get("prompt", "")[:30]
+                prompt = r.get("prompt", "")[:25]
                 count = len(r.get("urls", []))
-                f.write(f"| {r['line']} | {status} | {prompt} | {count} |\n")
-            f.write(f"\n**总计: {success_count} 成功, {fail_count} 失败**\n")
-            if fail_count > 0:
-                f.write(f"\n### ❌ 失败详情\n")
-                for r in results:
-                    if not r["success"]:
-                        f.write(f"- 第{r['line']}行: {r['prompt'][:40]} → `{r['error']}`\n")
+                conv_id = r.get("conversation_id", "-")[:12] if r.get("conversation_id") else "-"
+                f.write(f"| {r['line']} | {status} | {prompt} | {count} | {conv_id} |\n")
+            f.write(f"\n**总计: {success_count} 成功, {fail_count} 失败**\n\n")
+            f.write(f"📁 Artifacts 包含:\n")
+            f.write(f"- `output/results_*.json` → 汇总结果\n")
+            f.write(f"- `output/raw_api_responses/` → 每个任务的原始 API 响应\n")
+            f.write(f"- `logs/` → 完整运行日志\n")
 
-    # 返回退出码
     if fail_count > 0:
         sys.exit(1)
 
