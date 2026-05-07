@@ -10,26 +10,19 @@ import uuid
 import logging
 from datetime import datetime
 
-# 设置日志
-log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+# ====== 修复导入路径 ======
+# 获取脚本所在目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 获取仓库根目录 (上一级)
+ROOT_DIR = os.path.dirname(SCRIPT_DIR)
+# 把根目录和 module 目录都加入 Python 搜索路径
+sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, "module"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# 添加模块路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from token_manager import TokenManager
-from api_client import ApiClient
+# 现在可以正常导入了
+from module.token_manager import TokenManager
+from module.api_client import ApiClient
+# ====== 导入路径修复完毕 ======
 
 
 def load_config():
