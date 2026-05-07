@@ -21,11 +21,9 @@ jobs:
       - name: 安装依赖
         run: pip install requests numpy opencv-python-headless pillow scikit-learn
 
-      - name: 创建兼容模块和修复导入
+      - name: 创建兼容模块
         run: |
           mkdir -p common bridge
-          
-          # common/log.py
           cat > common/log.py << 'PYEOF'
           import logging, sys
           logger = logging.getLogger("doubao")
@@ -37,51 +35,28 @@ jobs:
           PYEOF
           touch common/__init__.py
           touch bridge/__init__.py
-          
           echo "✅ 兼容模块已创建"
 
-      - name: 修复所有模块的导入语句
+      - name: 修复模块导入
         run: |
           python3 << 'PYEOF'
           import os
-
-          files = [
-              'module/image_processor.py',
-              'module/image_storage.py',
-              'module/image_uploader.py',
-              'module/token_manager.py',
-              'module/api_client.py',
-              'doubao.py'
-          ]
-
-          for fp in files:
-              if not os.path.exists(fp):
-                  print(f'⚠️  跳过(不存在): {fp}')
-                  continue
-              
-              with open(fp, 'r', encoding='utf-8') as f:
-                  content = f.read()
-              
-              old = 'from common.log import logger'
-              new = '''try:
-              from common.log import logger
-          except ImportError:
-              import logging
-              logger = logging.getLogger(__name__)'''
-              
-              if old in content:
-                  content = content.replace(old, new)
-                  with open(fp, 'w', encoding='utf-8') as f:
-                      f.write(content)
-                  print(f'✅ 已修复: {fp}')
-              else:
-                  print(f'⏭️  跳过(无需修复): {fp}')
+          for fp in ['module/image_processor.py','module/image_storage.py','module/image_uploader.py','module/token_manager.py','module/api_client.py','doubao.py']:
+              if os.path.exists(fp):
+                  with open(fp,'r') as f: c = f.read()
+                  old = 'from common.log import logger'
+                  new = 'try:\n    from common.log import logger\nexcept ImportError:\n    import logging\n    logger = logging.getLogger(__name__)'
+                  if old in c:
+                      with open(fp,'w') as f: f.write(c.replace(old,new))
+                      print(f'✅ {fp}')
+                  else: print(f'⏭️  {fp}')
+              else: print(f'⚠️  {fp} 不存在')
           PYEOF
 
-      - name: 修复 api_client.py 响应解析错误
+      - name: 修复 api_client.py 响应解析
         run: |
           python3 << 'PYEOF'
-          import os, re
+          import os
 
           fp = 'module/api_client.py'
           if not os.path.exists(fp):
@@ -91,37 +66,11 @@ jobs:
           with open(fp, 'r', encoding='utf-8') as f:
               content = f.read()
 
-          # 替换 send_request 方法中的流式响应处理部分
-          old_block = """            for line in response.iter_lines():
-                  if not line:
-                      continue
-                      
-                  line = line.decode('utf-8')
-                  if not line.startswith("data:"):
-                      continue
-                      
-                  try:
-                      data = json.loads(line[5:])
-                      event_data = json.loads(data.get("event_data", "{}"))
-                      logger.debug(f"[Doubao] Response event_data: {event_data}")"""
-
-          new_block = """            for line in response.iter_lines():
-                  if not line:
-                      continue
-                      
-                  line = line.decode('utf-8')
-                  if not line.startswith("data:"):
-                      continue
-                      
-                  try:
-                      json_str = line[5:].strip()
-                      if not json_str or json_str == "[DONE]":
-                          continue
-                      
-                      data_chunk = json.loads(json_str)
-                      event_data_raw = data_chunk.get("event_data", "{}")
-                      
-                      # 安全处理 event_data：可能是字符串也可能是字典
+          # 修复1: event_data 类型安全处理
+          old1 = '''event_data = json.loads(data.get("event_data", "{}"))
+                      logger.debug(f"[Doubao] Response event_data: {event_data}")'''
+          
+          new1 = '''event_data_raw = data.get("event_data", "{}")
                       if isinstance(event_data_raw, str):
                           try:
                               event_data = json.loads(event_data_raw)
@@ -130,71 +79,65 @@ jobs:
                               continue
                       else:
                           event_data = event_data_raw
-                      
                       if not isinstance(event_data, dict):
-                          logger.warning(f"[Doubao] event_data 不是字典类型: {type(event_data)}")
                           continue
-                      
-                      logger.debug(f"[Doubao] Response event_data: {event_data}")"""
+                      logger.debug(f"[Doubao] Response event_data: {event_data}")'''
 
-          if old_block in content:
-              content = content.replace(old_block, new_block)
-              with open(fp, 'w', encoding='utf-8') as f:
-                  f.write(content)
-              print(f'✅ 已修复 api_client.py 响应解析')
+          if old1 in content:
+              content = content.replace(old1, new1)
+              print('✅ 修复1: event_data 类型安全')
           else:
-              print(f'⚠️  未找到匹配代码块，尝试备选修复...')
-              
-              # 备选：直接修复 json.loads(data.get(...)) 这一行
-              old_line = 'event_data = json.loads(data.get("event_data", "{}"))'
-              new_line = '''event_data_raw = data.get("event_data", "{}")
-                      if isinstance(event_data_raw, str):
-                          event_data = json.loads(event_data_raw)
-                      else:
-                          event_data = event_data_raw'''
-              
-              if old_line in content:
-                  content = content.replace(old_line, new_line)
-                  with open(fp, 'w', encoding='utf-8') as f:
-                      f.write(content)
-                  print(f'✅ 备选修复成功')
-              else:
-                  print(f'❌ 未找到任何匹配代码，请手动检查 api_client.py')
-          PYEOF
+              print('⚠️  修复1: 未找到匹配代码')
 
-      - name: 修复 message 字段的类型处理
-        run: |
-          python3 << 'PYEOF'
-          import os
-
-          fp = 'module/api_client.py'
-          if not os.path.exists(fp):
-              exit(1)
-
-          with open(fp, 'r', encoding='utf-8') as f:
-              content = f.read()
-
-          # 修复 message 可能是字符串的问题
-          old_line = 'message = event_data["message"]'
-          new_block = '''message_raw = event_data["message"]
-                      if isinstance(message_raw, str):
-                          try:
-                              message = json.loads(message_raw)
-                          except json.JSONDecodeError:
+          # 修复2: message 类型安全处理
+          old2 = '''if "message" in event_data:
+                          message = event_data["message"]
+                          logger.debug(f"[Doubao] Message data: {message}")
+                          if message.get("content_type") == 2010:'''
+          
+          new2 = '''if "message" in event_data:
+                          message = event_data["message"]
+                          if isinstance(message, str):
+                              try:
+                                  message = json.loads(message)
+                              except json.JSONDecodeError:
+                                  continue
+                          if not isinstance(message, dict):
                               continue
-                      else:
-                          message = message_raw'''
+                          logger.debug(f"[Doubao] Message data: {message}")
+                          if message.get("content_type") == 2010:'''
 
-          if old_line in content:
-              content = content.replace(old_line, message_raw)
-              # 替换后续的 message 引用
-              content = content.replace('message_raw', 'message')
-              content = content.replace(old_line, new_block)
-              with open(fp, 'w', encoding='utf-8') as f:
-                  f.write(content)
-              print(f'✅ 已修复 message 类型处理')
+          if old2 in content:
+              content = content.replace(old2, new2)
+              print('✅ 修复2: message 类型安全')
           else:
-              print(f'⏭️  message 行已处理或不存在')
+              print('⚠️  修复2: 未找到匹配代码')
+
+          # 修复3: content 类型安全处理
+          old3 = '''content = json.loads(message["content"])
+                                  if "data" in content:'''
+          
+          new3 = '''content_raw = message["content"]
+                                  if isinstance(content_raw, str):
+                                      try:
+                                          content = json.loads(content_raw)
+                                      except json.JSONDecodeError:
+                                          continue
+                                  else:
+                                      content = content_raw
+                                  if isinstance(content, dict) and "data" in content:'''
+
+          if old3 in content:
+              content = content.replace(old3, new3)
+              print('✅ 修复3: content 类型安全')
+          else:
+              print('⚠️  修复3: 未找到匹配代码')
+
+          # 写入修复后的文件
+          with open(fp, 'w', encoding='utf-8') as f:
+              f.write(content)
+          
+          print('✅ api_client.py 修复完成')
           PYEOF
 
       - name: 创建配置文件
