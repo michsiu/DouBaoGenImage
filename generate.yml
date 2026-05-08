@@ -1,0 +1,240 @@
+name: 豆包批量生图
+
+on:
+  push:
+    paths:
+      - 'task.txt'
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装依赖
+        run: pip install requests numpy opencv-python-headless pillow scikit-learn
+
+      - name: 创建兼容模块
+        run: |
+          mkdir -p common bridge
+          cat > common/log.py << 'PYEOF'
+          import logging, sys
+          logger = logging.getLogger("doubao")
+          logger.setLevel(logging.INFO)
+          if not logger.handlers:
+              handler = logging.StreamHandler(sys.stdout)
+              handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+              logger.addHandler(handler)
+          PYEOF
+          touch common/__init__.py
+          touch bridge/__init__.py
+          echo "✅ 兼容模块已创建"
+
+      - name: 修复模块导入
+        run: |
+          python3 << 'PYEOF'
+          import os
+          for fp in ['module/image_processor.py','module/image_storage.py','module/image_uploader.py','module/token_manager.py','module/api_client.py','doubao.py']:
+              if os.path.exists(fp):
+                  with open(fp,'r') as f: c = f.read()
+                  old = 'from common.log import logger'
+                  new = 'try:\n    from common.log import logger\nexcept ImportError:\n    import logging\n    logger = logging.getLogger(__name__)'
+                  if old in c:
+                      with open(fp,'w') as f: f.write(c.replace(old,new))
+                      print(f'✅ {fp}')
+                  else: print(f'⏭️  {fp}')
+              else: print(f'⚠️  {fp} 不存在')
+          PYEOF
+
+      - name: 完全重写 api_client.py 的 send_request 方法
+        run: |
+          python3 << 'PYEOF'
+          import os, re
+
+          fp = 'module/api_client.py'
+          with open(fp, 'r', encoding='utf-8') as f:
+              content = f.read()
+
+          # 找到 send_request 方法的开头和结尾，整个替换
+          # 策略：找到 "def send_request" 到下一个 "def " 之间的内容，全部替换
+
+          new_method = '''    def send_request(self, data, endpoint="/samantha/chat/completion"):
+          """发送请求 - 已修复类型安全版本"""
+          try:
+              url = self.base_url + endpoint
+              headers = self._get_headers()
+              
+              if endpoint == "/samantha/chat/completion" and "messages" in data:
+                  if isinstance(data["messages"][0]["content"], dict):
+                      data["messages"][0]["content"] = json.dumps(data["messages"][0]["content"])
+              
+              response = requests.post(
+                  url, json=data, headers=headers,
+                  params=self._get_params(),
+                  stream=endpoint == "/samantha/chat/completion",
+                  timeout=120
+              )
+              response.raise_for_status()
+              
+              if endpoint == "/samantha/chat/completion":
+                  image_urls = []
+                  conversation_id = None
+                  section_id = None
+                  reply_id = None
+                  
+                  for line in response.iter_lines():
+                      if not line:
+                          continue
+                      line = line.decode('utf-8')
+                      if not line.startswith("data:"):
+                          continue
+                      try:
+                          json_str = line[5:].strip()
+                          if not json_str or json_str == "[DONE]":
+                              continue
+                          
+                          data_chunk = json.loads(json_str)
+                          event_data_raw = data_chunk.get("event_data", "{}")
+                          
+                          # 安全处理 event_data
+                          if isinstance(event_data_raw, str):
+                              try:
+                                  event_data = json.loads(event_data_raw)
+                              except json.JSONDecodeError:
+                                  continue
+                          elif isinstance(event_data_raw, dict):
+                              event_data = event_data_raw
+                          else:
+                              continue
+                          
+                          if not isinstance(event_data, dict):
+                              continue
+                          
+                          if "conversation_id" in event_data:
+                              conversation_id = event_data["conversation_id"]
+                              section_id = event_data.get("section_id")
+                              reply_id = event_data.get("reply_id")
+                          
+                          if "message" in event_data:
+                              message = event_data["message"]
+                              # 安全处理 message
+                              if isinstance(message, str):
+                                  try:
+                                      message = json.loads(message)
+                                  except json.JSONDecodeError:
+                                      continue
+                              if not isinstance(message, dict):
+                                  continue
+                              
+                              if message.get("content_type") == 2010:
+                                  content = message.get("content", "{}")
+                                  # 安全处理 content
+                                  if isinstance(content, str):
+                                      try:
+                                          content = json.loads(content)
+                                      except json.JSONDecodeError:
+                                          continue
+                                  if not isinstance(content, dict):
+                                      continue
+                                  
+                                  for img_data in content.get("data", []):
+                                      if isinstance(img_data, dict):
+                                          image_raw = img_data.get("image_raw", {})
+                                          if isinstance(image_raw, dict):
+                                              url = image_raw.get("url")
+                                              if url:
+                                                  image_urls.append(url)
+                                                  logger.info(f"[Doubao] Found image URL: {url}")
+                      except json.JSONDecodeError:
+                          continue
+                      except Exception as e:
+                          logger.error(f"[Doubao] Error processing response line: {e}")
+                          continue
+                  
+                  return {
+                      "urls": image_urls,
+                      "conversation_id": conversation_id,
+                      "section_id": section_id,
+                      "reply_id": reply_id
+                  }
+              else:
+                  return response.json()
+          except Exception as e:
+              logger.error(f"[Doubao] Error sending request: {e}")
+              return None'''
+
+          # 用正则匹配整个 send_request 方法
+          pattern = r'    def send_request\(self.*?return None\n'
+          match = re.search(pattern, content, re.DOTALL)
+          
+          if match:
+              content = content[:match.start()] + new_method + '\n' + content[match.end():]
+              print('✅ 已替换 send_request 方法')
+          else:
+              # 备选: 尝试匹配到文件末尾
+              pattern2 = r'    def send_request\(self.*'
+              match2 = re.search(pattern2, content, re.DOTALL)
+              if match2:
+                  # 从 send_request 开始截到文件末尾
+                  before = content[:match2.start()]
+                  # 找到下一个 def 或类结束
+                  rest = content[match2.start():]
+                  next_def = re.search(r'\n    def [a-z]', rest)
+                  if next_def:
+                      after = rest[next_def.start():]
+                  else:
+                      after = ''
+                  content = before + new_method + '\n' + after
+                  print('✅ 备选方案已替换 send_request 方法')
+              else:
+                  print('❌ 未找到 send_request 方法')
+                  exit(1)
+
+          with open(fp, 'w', encoding='utf-8') as f:
+              f.write(content)
+          print('✅ api_client.py 重写完成')
+          PYEOF
+
+      - name: 创建配置文件
+        env:
+          DOUBAO_COOKIE: ${{ secrets.DOUBAO_COOKIE }}
+          DOUBAO_MSTOKEN: ${{ secrets.DOUBAO_MSTOKEN }}
+          DOUBAO_A_BOGUS: ${{ secrets.DOUBAO_A_BOGUS }}
+        run: |
+          python3 -c "
+          import json, os
+          cfg = {
+              'commands': {'draw': '豆包'},
+              'auth': {
+                  'cookie': os.environ['DOUBAO_COOKIE'],
+                  'msToken': os.environ['DOUBAO_MSTOKEN'],
+                  'a_bogus': os.environ['DOUBAO_A_BOGUS']
+              },
+              'storage': {'retention_days': 7},
+              'styles': [],
+              'params': {'ratios': ['1:1','2:3','4:3','9:16','16:9'], 'default_ratio': '1:1'}
+          }
+          with open('config.json','w') as f:
+              json.dump(cfg,f,ensure_ascii=False,indent=2)
+          print('✅ config.json 已生成')
+          "
+
+      - name: 运行生图任务
+        id: generate
+        run: python scripts/generate.py
+
+      - name: 上传结果和日志
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doubao-results
+          path: |
+            output/
+            logs/
