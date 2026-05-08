@@ -1,0 +1,188 @@
+name: Run Qwen2.5-Sex Model Inference
+
+on:
+  push:
+    paths:
+      - 'task.txt'
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: '输入提示词'
+        required: true
+        default: '你好'
+      temperature:
+        description: '温度参数'
+        required: false
+        default: '0.3'
+      max_tokens:
+        description: '最大生成令牌数'
+        required: false
+        default: '512'
+
+jobs:
+  # 解析 task.txt 配置
+  parse-config:
+    runs-on: ubuntu-latest
+    outputs:
+      prompt: ${{ steps.parse.outputs.PROMPT }}
+      temperature: ${{ steps.parse.outputs.TEMPERATURE }}
+      top_p: ${{ steps.parse.outputs.TOP_P }}
+      top_k: ${{ steps.parse.outputs.TOP_K }}
+      max_tokens: ${{ steps.parse.outputs.MAX_TOKENS }}
+      system_message: ${{ steps.parse.outputs.SYSTEM_MESSAGE }}
+      save_artifacts: ${{ steps.parse.outputs.SAVE_ARTIFACTS }}
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Parse task.txt
+        id: parse
+        run: |
+          if [ -f "task.txt" ]; then
+            while IFS='=' read -r key value; do
+              [[ $key =~ ^#.*$ ]] && continue
+              [[ -z $key ]] && continue
+              value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+              echo "${key}=${value}" >> $GITHUB_OUTPUT
+            done < task.txt
+          fi
+
+  # 运行模型推理
+  run-inference:
+    needs: parse-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-qwen2.5-sex-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            hf-models-qwen2.5-sex-${{ runner.os }}-
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers>=4.44.2 accelerate
+          pip install huggingface_hub
+          # 如果需要 Gradio UI，在 Actions 中通常不需要
+          # pip install gradio>=4.44.0
+
+      - name: Download model
+        run: |
+          python -c "
+          from huggingface_hub import snapshot_download
+          import os
+          
+          model_name = 'ystemsrx/Qwen2.5-Sex'
+          cache_dir = os.path.expanduser('~/.cache/huggingface/hub')
+          
+          print(f'Downloading model: {model_name}')
+          snapshot_download(
+              repo_id=model_name,
+              cache_dir=cache_dir,
+              resume_download=True,
+              ignore_patterns=['*.md', '*.txt']
+          )
+          print('Model downloaded successfully!')
+          "
+
+      - name: Run inference
+        id: inference
+        run: |
+          python run_inference.py \
+            --prompt "${{ needs.parse-config.outputs.prompt || '你好' }}" \
+            --temperature ${{ needs.parse-config.outputs.temperature || 3 }} \
+            --top-p ${{ needs.parse-config.outputs.top_p || 9 }} \
+            --top-k ${{ needs.parse-config.outputs.top_k || 80 }} \
+            --max-tokens ${{ needs.parse-config.outputs.max_tokens || 512 }} \
+            --system-message "${{ needs.parse-config.outputs.system_message || '' }}" \
+            --output result.txt
+
+      - name: Display result
+        run: |
+          echo "============================================"
+          echo "推理结果:"
+          echo "============================================"
+          cat result.txt
+          echo ""
+          echo "============================================"
+
+      - name: Upload inference result
+        uses: actions/upload-artifact@v3
+        if: needs.parse-config.outputs.save_artifacts == 'true'
+        with:
+          name: inference-result
+          path: result.txt
+          retention-days: 7
+
+  # 批量处理模式
+  batch-inference:
+    needs: parse-config
+    if: needs.parse-config.outputs.save_artifacts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Cache models
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-qwen2.5-sex-${{ runner.os }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers>=4.44.2 accelerate huggingface_hub
+
+      - name: Run batch inference from prompts.txt
+        run: |
+          if [ -f "prompts.txt" ]; then
+            python run_batch_inference.py \
+              --input prompts.txt \
+              --output batch_results.txt \
+              --temperature ${{ needs.parse-config.outputs.temperature || 3 }} \
+              --top-p ${{ needs.parse-config.outputs.top_p || 9 }} \
+              --top-k ${{ needs.parse-config.outputs.top_k || 80 }} \
+              --max-tokens ${{ needs.parse-config.outputs.max_tokens || 512 }}
+            
+            cat batch_results.txt
+          else
+            echo "No prompts.txt found, skipping batch inference"
+          fi
+
+      - name: Upload batch results
+        uses: actions/upload-artifact@v3
+        with:
+          name: batch-results
+          path: batch_results.txt
+          retention-days: 7
