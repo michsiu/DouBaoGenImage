@@ -59,6 +59,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug - Show files
+        run: |
+          pwd
+          ls -la
+          echo "---"
+          ls -la *.py || echo "No Python files found"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -106,6 +113,8 @@ jobs:
       - name: Run inference
         id: inference
         run: |
+          # 确保在正确的目录中
+          cd ${{ github.workspace }}
           python run_inference.py \
             --prompt "${{ needs.parse-config.outputs.prompt || '你好' }}" \
             --temperature ${{ needs.parse-config.outputs.temperature || 3 }} \
