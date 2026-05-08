@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write  # 允许 push 回仓库
+      contents: write
     
     steps:
       - uses: actions/checkout@v4
@@ -142,7 +142,6 @@ jobs:
           print(response)
           print('=' * 60)
 
-          # 保存结果
           timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
           with open('inference_output.txt', 'w', encoding='utf-8') as f:
               f.write(f'# Qwen2.5-Se 推理结果\n\n')
@@ -159,10 +158,17 @@ jobs:
               f.write(f'**响应**:\n{response}\n')
           "
 
+      - name: Upload result to artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-output
+          path: inference_output.txt
+          retention-days: 7
+
       - name: Push result to repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add qwen2.5-sex_result.txt
+          git add inference_output.txt
           git commit -m "📝 Update inference result [skip ci]" || echo "No changes to commit"
           git push
