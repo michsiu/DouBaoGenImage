@@ -24,7 +24,6 @@ jobs:
       top_k: ${{ steps.parse.outputs.TOP_K }}
       max_tokens: ${{ steps.parse.outputs.MAX_TOKENS }}
       system_message: ${{ steps.parse.outputs.SYSTEM_MESSAGE }}
-      save_artifacts: ${{ steps.parse.outputs.SAVE_ARTIFACTS }}
     steps:
       - uses: actions/checkout@v4
       
@@ -44,6 +43,8 @@ jobs:
     needs: parse-config
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write  # 允许 push 回仓库
     
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +54,22 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-qwen2.5-sex-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            hf-models-qwen2.5-sex-${{ runner.os }}-
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
@@ -60,7 +77,6 @@ jobs:
           pip install transformers>=4.44.2 accelerate huggingface_hub
 
       - name: Download model
-       
         run: |
           python -c "
           from huggingface_hub import snapshot_download
@@ -73,13 +89,14 @@ jobs:
           python -c "
           import torch
           from transformers import AutoModelForCausalLM, AutoTokenizer
+          from datetime import datetime
 
-          prompt = '${{ needs.parse-config.outputs.prompt || '你好' }}'
+          prompt = '''${{ needs.parse-config.outputs.prompt || '你好' }}'''
           temperature = ${{ needs.parse-config.outputs.temperature || 0.3 }}
           top_p = ${{ needs.parse-config.outputs.top_p || 0.9 }}
           top_k = ${{ needs.parse-config.outputs.top_k || 80 }}
           max_tokens = ${{ needs.parse-config.outputs.max_tokens || 512 }}
-          system_message = '${{ needs.parse-config.outputs.system_message || '' }}'
+          system_message = '''${{ needs.parse-config.outputs.system_message || '' }}'''
 
           print('=' * 60)
           print('Qwen2.5-Sex 模型推理')
@@ -125,19 +142,27 @@ jobs:
           print(response)
           print('=' * 60)
 
-          with open('result.txt', 'w', encoding='utf-8') as f:
-              f.write(f'提示词: {prompt}\n\n')
-              f.write(f'参数: temperature={temperature}, top_p={top_p}, ')
-              f.write(f'top_k={top_k}, max_tokens={max_tokens}\n\n')
-              f.write(f'响应:\n{response}\n')
+          # 保存结果
+          timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+          with open('inference_output.txt', 'w', encoding='utf-8') as f:
+              f.write(f'# Qwen2.5-Se 推理结果\n\n')
+              f.write(f'**生成时间**: {timestamp}\n\n')
+              f.write(f'**提示词**:\n{prompt}\n\n')
+              f.write(f'**参数**:\n')
+              f.write(f'- temperature: {temperature}\n')
+              f.write(f'- top_p: {top_p}\n')
+              f.write(f'- top_k: {top_k}\n')
+              f.write(f'- max_tokens: {max_tokens}\n')
+              if system_message:
+                  f.write(f'- system_message: {system_message}\n')
+              f.write(f'\n---\n\n')
+              f.write(f'**响应**:\n{response}\n')
           "
 
-      - name: Display result
-        run: cat result.txt
-
-      - name: Upload artifact
-        if: needs.parse-config.outputs.save_artifacts == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: inference-result
-          path: result.txt
+      - name: Push result to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add qwen2.5-sex_result.txt
+          git commit -m "📝 Update inference result [skip ci]" || echo "No changes to commit"
+          git push
