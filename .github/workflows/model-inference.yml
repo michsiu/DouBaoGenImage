@@ -60,8 +60,7 @@ jobs:
           pip install transformers>=4.44.2 accelerate huggingface_hub
 
       - name: Download model
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+       
         run: |
           python -c "
           from huggingface_hub import snapshot_download
