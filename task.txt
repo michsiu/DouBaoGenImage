@@ -1,4 +1,4 @@
-PROMPT=描写和小萝莉的调情，注意分为要暧昧，对象是小萝莉，要体现小萝莉的特质
+PROMPT=和御姐性格的女孩的性爱故事
 SYSTEM_MESSAGE=
 TEMPERATURE=0.5
 TOP_P=0.9
