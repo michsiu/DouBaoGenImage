@@ -13,17 +13,8 @@ on:
         description: '输入提示词'
         required: true
         default: '你好'
-      temperature:
-        description: '温度参数'
-        required: false
-        default: '0.3'
-      max_tokens:
-        description: '最大生成令牌数'
-        required: false
-        default: '512'
 
 jobs:
-  # 解析 task.txt 配置
   parse-config:
     runs-on: ubuntu-latest
     outputs:
@@ -49,95 +40,105 @@ jobs:
             done < task.txt
           fi
 
-  # 运行模型推理
   run-inference:
     needs: parse-config
     runs-on: ubuntu-latest
     timeout-minutes: 30
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Debug - Show files
-        run: |
-          pwd
-          ls -la
-          echo "---"
-          ls -la *.py || echo "No Python files found"
+      - uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Cache Hugging Face models
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-models-qwen2.5-sex-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            hf-models-qwen2.5-sex-${{ runner.os }}-
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            pip-${{ runner.os }}-
-
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers>=4.44.2 accelerate
-          pip install huggingface_hub
+          pip install transformers>=4.44.2 accelerate huggingface_hub
 
       - name: Download model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python -c "
           from huggingface_hub import snapshot_download
-          
-          model_name = 'ystemsrx/Qwen2.5-Sex'
-          
-          print(f'Downloading model: {model_name}')
-          snapshot_download(
-              repo_id=model_name,
-              resume_download=True,
-              ignore_patterns=['*.md', '*.txt']
-          )
-          print('Model downloaded successfully!')
+          snapshot_download('ystemsrx/Qwen2.5-Sex', resume_download=True)
+          print('模型下载完成')
           "
 
-      - name: Run inference
-        id: inference
+      - name: 🚀 Run inference
         run: |
-          # 确保在正确的目录中
-          cd ${{ github.workspace }}
-          python run_inference.py \
-            --prompt "${{ needs.parse-config.outputs.prompt || '你好' }}" \
-            --temperature ${{ needs.parse-config.outputs.temperature || 3 }} \
-            --top-p ${{ needs.parse-config.outputs.top_p || 9 }} \
-            --top-k ${{ needs.parse-config.outputs.top_k || 80 }} \
-            --max-tokens ${{ needs.parse-config.outputs.max_tokens || 512 }} \
-            --system-message "${{ needs.parse-config.outputs.system_message || '' }}" \
-            --output result.txt
+          python -c "
+          import torch
+          from transformers import AutoModelForCausalLM, AutoTokenizer
+
+          prompt = '${{ needs.parse-config.outputs.prompt || '你好' }}'
+          temperature = ${{ needs.parse-config.outputs.temperature || 0.3 }}
+          top_p = ${{ needs.parse-config.outputs.top_p || 0.9 }}
+          top_k = ${{ needs.parse-config.outputs.top_k || 80 }}
+          max_tokens = ${{ needs.parse-config.outputs.max_tokens || 512 }}
+          system_message = '${{ needs.parse-config.outputs.system_message || '' }}'
+
+          print('=' * 60)
+          print('Qwen2.5-Sex 模型推理')
+          print('=' * 60)
+          print(f'提示词: {prompt}')
+
+          model_name = 'ystemsrx/Qwen2.5-Sex'
+          print(f'\n正在加载模型: {model_name}')
+          
+          tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+          model = AutoModelForCausalLM.from_pretrained(
+              model_name,
+              dtype=torch.float32,
+              device_map='cpu',
+              trust_remote_code=True,
+              low_cpu_mem_usage=True
+          )
+          print('模型加载完成！')
+
+          messages = []
+          if system_message:
+              messages.append({'role': 'system', 'content': system_message})
+          messages.append({'role': 'user', 'content': prompt})
+
+          text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+          inputs = tokenizer([text], return_tensors='pt')
+
+          print('正在生成响应...')
+          with torch.no_grad():
+              outputs = model.generate(
+                  inputs.input_ids,
+                  max_new_tokens=max_tokens,
+                  top_p=top_p,
+                  top_k=top_k,
+                  temperature=temperature,
+                  do_sample=True,
+                  pad_token_id=tokenizer.eos_token_id
+              )
+
+          response = tokenizer.decode(outputs[0][len(inputs.input_ids[0]):], skip_special_tokens=True)
+
+          print('=' * 60)
+          print(response)
+          print('=' * 60)
+
+          with open('result.txt', 'w', encoding='utf-8') as f:
+              f.write(f'提示词: {prompt}\n\n')
+              f.write(f'参数: temperature={temperature}, top_p={top_p}, ')
+              f.write(f'top_k={top_k}, max_tokens={max_tokens}\n\n')
+              f.write(f'响应:\n{response}\n')
+          "
 
       - name: Display result
-        run: |
-          echo "============================================"
-          echo "推理结果:"
-          echo "============================================"
-          cat result.txt
-          echo ""
-          echo "============================================"
+        run: cat result.txt
 
-      - name: Upload inference result
+      - name: Upload artifact
         if: needs.parse-config.outputs.save_artifacts == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: inference-result
           path: result.txt
-          retention-days: 7
-          compression-level: 6
